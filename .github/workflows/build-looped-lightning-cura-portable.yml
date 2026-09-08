@@ -83,45 +83,45 @@ jobs:
           if (-not (Test-Path (Join-Path $dist 'UltiMaker-Cura.exe'))) { throw 'Full Cura distribution was not created.' }
           Copy-Item (Join-Path $env:GITHUB_WORKSPACE 'custom-engine\CuraEngine.exe') (Join-Path $dist 'CuraEngine.exe') -Force
 
-          $launcher = @'
-@echo off
-setlocal
-set "ROOT=%~dp0"
-set "ORIGINAL_APPDATA=%APPDATA%"
-set "ORIGINAL_LOCALAPPDATA=%LOCALAPPDATA%"
+          $launcherLines = @(
+            '@echo off',
+            'setlocal',
+            'set "ROOT=%~dp0"',
+            'set "ORIGINAL_APPDATA=%APPDATA%"',
+            'set "ORIGINAL_LOCALAPPDATA=%LOCALAPPDATA%"',
+            '',
+            'if not exist "%ROOT%UserData\Roaming" mkdir "%ROOT%UserData\Roaming"',
+            'if not exist "%ROOT%UserData\Local" mkdir "%ROOT%UserData\Local"',
+            '',
+            'rem First launch only: clone the user''s existing Cura settings/profile tree.',
+            'if not exist "%ROOT%UserData\Roaming\cura" if exist "%ORIGINAL_APPDATA%\cura" (',
+            '  echo Importing existing Cura settings into the isolated Looped Lightning copy...',
+            '  robocopy "%ORIGINAL_APPDATA%\cura" "%ROOT%UserData\Roaming\cura" /E /NFL /NDL /NJH /NJS /NP >nul',
+            ')',
+            '',
+            'set "APPDATA=%ROOT%UserData\Roaming"',
+            'set "LOCALAPPDATA=%ROOT%UserData\Local"',
+            'start "Looped Lightning Cura" "%ROOT%UltiMaker-Cura.exe"',
+            'endlocal'
+          )
+          Set-Content -Path (Join-Path $dist 'START-LOOPED-LIGHTNING.cmd') -Value $launcherLines -Encoding ASCII
 
-if not exist "%ROOT%UserData\Roaming" mkdir "%ROOT%UserData\Roaming"
-if not exist "%ROOT%UserData\Local" mkdir "%ROOT%UserData\Local"
-
-rem First launch only: clone the user's existing Cura settings/profile tree.
-if not exist "%ROOT%UserData\Roaming\cura" if exist "%ORIGINAL_APPDATA%\cura" (
-  echo Importing existing Cura settings into the isolated Looped Lightning copy...
-  robocopy "%ORIGINAL_APPDATA%\cura" "%ROOT%UserData\Roaming\cura" /E /NFL /NDL /NJH /NJS /NP >nul
-)
-
-set "APPDATA=%ROOT%UserData\Roaming"
-set "LOCALAPPDATA=%ROOT%UserData\Local"
-start "Looped Lightning Cura" "%ROOT%UltiMaker-Cura.exe"
-endlocal
-'@
-          Set-Content -Path (Join-Path $dist 'START-LOOPED-LIGHTNING.cmd') -Value $launcher -Encoding ASCII
-
-          $readme = @'
-LOOPED LIGHTNING CURA - EXPERIMENTAL BUILD
-
-This is a full portable Cura build using the custom Looped Lightning CuraEngine.
-Normal Cura is not modified.
-
-IMPORTANT:
-- Start Cura with START-LOOPED-LIGHTNING.cmd, not UltiMaker-Cura.exe directly.
-- On first launch, the launcher copies your existing %%APPDATA%%\cura settings tree into this folder's UserData directory.
-- After that, this experimental copy uses its own APPDATA/LOCALAPPDATA so later changes stay isolated from normal Cura.
-- In this proof-of-concept build, selecting ordinary Lightning infill invokes the modified loop-closing Lightning engine.
-- The code has compiled successfully, but Looped Lightning geometry is still experimental and must be visually/physically tested.
-
-Custom engine source branch: AZgunNut/CuraEngine / looped-lightning-poc
-'@
-          Set-Content -Path (Join-Path $dist 'README-LOOPED-LIGHTNING.txt') -Value $readme -Encoding UTF8
+          $readmeLines = @(
+            'LOOPED LIGHTNING CURA - EXPERIMENTAL BUILD',
+            '',
+            'This is a full portable Cura build using the custom Looped Lightning CuraEngine.',
+            'Normal Cura is not modified.',
+            '',
+            'IMPORTANT:',
+            '- Start Cura with START-LOOPED-LIGHTNING.cmd, not UltiMaker-Cura.exe directly.',
+            '- On first launch, the launcher copies your existing %APPDATA%\cura settings tree into this folder''s UserData directory.',
+            '- After that, this experimental copy uses its own APPDATA/LOCALAPPDATA so later changes stay isolated from normal Cura.',
+            '- In this proof-of-concept build, selecting ordinary Lightning infill invokes the modified loop-closing Lightning engine.',
+            '- The code has compiled successfully, but Looped Lightning geometry is still experimental and must be visually/physically tested.',
+            '',
+            'Custom engine source branch: AZgunNut/CuraEngine / looped-lightning-poc'
+          )
+          Set-Content -Path (Join-Path $dist 'README-LOOPED-LIGHTNING.txt') -Value $readmeLines -Encoding UTF8
 
           $hash = Get-FileHash (Join-Path $dist 'CuraEngine.exe') -Algorithm SHA256
           "Custom CuraEngine SHA256: $($hash.Hash)" | Add-Content (Join-Path $dist 'README-LOOPED-LIGHTNING.txt')
