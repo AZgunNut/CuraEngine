@@ -60,6 +60,15 @@ jobs:
           package_overrides: ''
           profile: installer.jinja
 
+      - name: Disable Sentry for independent portable build
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $profile = '${{ steps.set-overrides.outputs.profile }}'
+          Write-Host "Patching Conan profile: $profile"
+          Add-Content -Path $profile -Value "`n[options]`n*:enable_sentry=False`n*:sentry_enabled=False`n*:with_sentry=False"
+          Get-Content $profile
+
       - name: Gather and build Cura packages
         shell: powershell
         run: |
