@@ -1,0 +1,144 @@
+name: Build Looped Lightning Cura Portable
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  build-windows-portable:
+    runs-on: windows-latest
+
+    steps:
+      - name: Setup Cura build environment
+        id: setup-environment
+        uses: ultimaker/cura-workflows/.github/actions/setup-build-environment@main
+        with:
+          repository: Ultimaker/Cura
+          branch: main
+          repository_path: _cura_sources
+          install_system_dependencies: true
+          python_set_env_vars: false
+          cura_workflows_branch: main
+
+      - name: Download our proven Looped Lightning CuraEngine artifact
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $artifactId = '10040918612'
+          $zip = Join-Path $env:RUNNER_TEMP 'looped-lightning-engine.zip'
+          $out = Join-Path $env:GITHUB_WORKSPACE 'custom-engine'
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          $headers = @{
+            Authorization = "Bearer $env:GH_TOKEN"
+            Accept = 'application/vnd.github+json'
+            'X-GitHub-Api-Version' = '2022-11-28'
+          }
+          Invoke-WebRequest -Headers $headers -Uri "https://api.github.com/repos/AZgunNut/CuraEngine/actions/artifacts/$artifactId/zip" -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath $out -Force
+          $engine = Get-ChildItem -Path $out -Recurse -Filter CuraEngine.exe | Select-Object -First 1
+          if (-not $engine) { throw 'CuraEngine.exe was not found in the downloaded artifact.' }
+          Copy-Item $engine.FullName (Join-Path $out 'CuraEngine.exe') -Force
+          Get-FileHash (Join-Path $out 'CuraEngine.exe') -Algorithm SHA256
+
+      - name: Prepare Cura installer Conan profile
+        id: set-overrides
+        uses: ultimaker/cura-workflows/.github/actions/set-package-overrides@main
+        with:
+          package_overrides: ''
+          profile: installer.jinja
+
+      - name: Gather and build Cura packages
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $pydir = Get-Content pydir.txt
+          $env:PATH += ";$pydir;$pydir/Scripts"
+          $curaVersion = '${{ steps.setup-environment.outputs.package_version }}'
+          Write-Host "Building Cura $curaVersion"
+          conan install --requires "cura/$curaVersion@ultimaker/testing" --build=missing -of cura_inst --deployer-package="*" --profile '${{ steps.set-overrides.outputs.profile }}'
+
+      - name: Create full Cura distribution
+        id: prepare-distribution
+        shell: cmd
+        run: |
+          call cura_inst\conanrun.bat
+          python -m venv cura_installer_venv
+          call cura_installer_venv\Scripts\Activate.bat
+          python -m pip install -r cura_inst\packaging\pip_requirements_core_basic.txt --no-warn-script-location
+          python -m pip install -r cura_inst\packaging\pip_requirements_core_hashes.txt --no-warn-script-location
+          python -m pip install -r cura_inst\packaging\pip_requirements_installer_basic.txt --no-warn-script-location
+          python Cura-workflows\runner_scripts\prepare_installer.py --os Windows --architecture X64 --summary-output %GITHUB_STEP_SUMMARY% --variables-output %GITHUB_OUTPUT%
+          pyinstaller cura_inst\UltiMaker-Cura.spec
+
+      - name: Insert Looped Lightning engine and portable launcher
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dist = Join-Path $env:GITHUB_WORKSPACE 'dist\UltiMaker-Cura'
+          if (-not (Test-Path (Join-Path $dist 'UltiMaker-Cura.exe'))) { throw 'Full Cura distribution was not created.' }
+          Copy-Item (Join-Path $env:GITHUB_WORKSPACE 'custom-engine\CuraEngine.exe') (Join-Path $dist 'CuraEngine.exe') -Force
+
+          $launcher = @'
+@echo off
+setlocal
+set "ROOT=%~dp0"
+set "ORIGINAL_APPDATA=%APPDATA%"
+set "ORIGINAL_LOCALAPPDATA=%LOCALAPPDATA%"
+
+if not exist "%ROOT%UserData\Roaming" mkdir "%ROOT%UserData\Roaming"
+if not exist "%ROOT%UserData\Local" mkdir "%ROOT%UserData\Local"
+
+rem First launch only: clone the user's existing Cura settings/profile tree.
+if not exist "%ROOT%UserData\Roaming\cura" if exist "%ORIGINAL_APPDATA%\cura" (
+  echo Importing existing Cura settings into the isolated Looped Lightning copy...
+  robocopy "%ORIGINAL_APPDATA%\cura" "%ROOT%UserData\Roaming\cura" /E /NFL /NDL /NJH /NJS /NP >nul
+)
+
+set "APPDATA=%ROOT%UserData\Roaming"
+set "LOCALAPPDATA=%ROOT%UserData\Local"
+start "Looped Lightning Cura" "%ROOT%UltiMaker-Cura.exe"
+endlocal
+'@
+          Set-Content -Path (Join-Path $dist 'START-LOOPED-LIGHTNING.cmd') -Value $launcher -Encoding ASCII
+
+          $readme = @'
+LOOPED LIGHTNING CURA - EXPERIMENTAL BUILD
+
+This is a full portable Cura build using the custom Looped Lightning CuraEngine.
+Normal Cura is not modified.
+
+IMPORTANT:
+- Start Cura with START-LOOPED-LIGHTNING.cmd, not UltiMaker-Cura.exe directly.
+- On first launch, the launcher copies your existing %%APPDATA%%\cura settings tree into this folder's UserData directory.
+- After that, this experimental copy uses its own APPDATA/LOCALAPPDATA so later changes stay isolated from normal Cura.
+- In this proof-of-concept build, selecting ordinary Lightning infill invokes the modified loop-closing Lightning engine.
+- The code has compiled successfully, but Looped Lightning geometry is still experimental and must be visually/physically tested.
+
+Custom engine source branch: AZgunNut/CuraEngine / looped-lightning-poc
+'@
+          Set-Content -Path (Join-Path $dist 'README-LOOPED-LIGHTNING.txt') -Value $readme -Encoding UTF8
+
+          $hash = Get-FileHash (Join-Path $dist 'CuraEngine.exe') -Algorithm SHA256
+          "Custom CuraEngine SHA256: $($hash.Hash)" | Add-Content (Join-Path $dist 'README-LOOPED-LIGHTNING.txt')
+
+      - name: Package portable build
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zip = Join-Path $env:GITHUB_WORKSPACE 'Looped-Lightning-Cura-Windows-X64.zip'
+          if (Test-Path $zip) { Remove-Item $zip -Force }
+          Compress-Archive -Path "$env:GITHUB_WORKSPACE\dist\UltiMaker-Cura\*" -DestinationPath $zip -CompressionLevel Optimal
+          Get-Item $zip | Format-List Name,Length,FullName
+          Get-FileHash $zip -Algorithm SHA256
+
+      - name: Upload full portable Cura build
+        uses: actions/upload-artifact@v4
+        with:
+          name: Looped-Lightning-Cura-Windows-X64
+          path: Looped-Lightning-Cura-Windows-X64.zip
+          retention-days: 30
