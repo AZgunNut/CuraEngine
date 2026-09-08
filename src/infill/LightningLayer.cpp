@@ -4,6 +4,7 @@
 #include "infill/LightningLayer.h" //The class we're implementing.
 
 #include <iterator> // advance
+#include <limits>
 
 #include "geometry/OpenPolyline.h"
 #include "infill/LightningDistanceField.h"
@@ -216,6 +217,102 @@ void LightningLayer::reconnectRoots(
     }
 }
 
+namespace
+{
+constexpr coord_t looped_lightning_max_distance = 12000; // 12 mm in CuraEngine's micron coordinate system.
+constexpr size_t looped_lightning_curve_segments = 6;
+
+/*!
+ * Close dangling Lightning polylines toward nearby infill or the island boundary.
+ *
+ * LightningTreeNode::convertToPolylines() emits polylines beginning at a leaf.
+ * For each leaf we look for the nearest point on another Lightning polyline and
+ * compare that with the nearest model boundary. If either is within 12 mm, add
+ * a short quadratic Bezier connector. The initial tangent continues away from
+ * the existing branch so the closure forms a flowing hook rather than a hard
+ * V-shaped reversal.
+ *
+ * This is deliberately a small proof of concept. Later versions can replace
+ * the vertex-only target search with nearest-point-on-segment indexing and make
+ * the distance/curvature user settings.
+ */
+void addLoopedLightningClosures(OpenLinesSet& result_lines, const Shape& limit_to_outline, const coord_t line_width)
+{
+    if (result_lines.empty() || limit_to_outline.empty())
+    {
+        return;
+    }
+
+    const size_t original_line_count = result_lines.size();
+    OpenLinesSet closures;
+
+    for (size_t line_idx = 0; line_idx < original_line_count; ++line_idx)
+    {
+        const OpenPolyline& source_line = result_lines[line_idx];
+        if (source_line.size() < 2)
+        {
+            continue;
+        }
+
+        const Point2LL source = source_line.front(); // Lightning polylines begin at leaves.
+        Point2LL target = PolygonUtils::findClosest(source, limit_to_outline).p();
+        coord_t best_distance = vSize(target - source);
+
+        // Prefer another piece of Lightning if it is nearer than the wall.
+        for (size_t candidate_line_idx = 0; candidate_line_idx < original_line_count; ++candidate_line_idx)
+        {
+            if (candidate_line_idx == line_idx)
+            {
+                continue;
+            }
+
+            const OpenPolyline& candidate_line = result_lines[candidate_line_idx];
+            for (const Point2LL& candidate : candidate_line)
+            {
+                const coord_t candidate_distance = vSize(candidate - source);
+                if (candidate_distance < best_distance)
+                {
+                    best_distance = candidate_distance;
+                    target = candidate;
+                }
+            }
+        }
+
+        // Ignore long closures and tiny hooks that would only over-extrude a junction.
+        if (best_distance > looped_lightning_max_distance || best_distance < line_width * 2)
+        {
+            continue;
+        }
+
+        const Point2LL branch_outward = source - source_line[1];
+        const coord_t branch_length = vSize(branch_outward);
+
+        Point2LL control = (source + target) / 2;
+        if (branch_length > 0)
+        {
+            // Continue the leaf tangent for roughly one third of the closure length.
+            const double tangent_scale = 0.35 * static_cast<double>(best_distance) / static_cast<double>(branch_length);
+            control = source + branch_outward * tangent_scale;
+        }
+
+        OpenPolyline closure;
+        for (size_t segment_idx = 0; segment_idx <= looped_lightning_curve_segments; ++segment_idx)
+        {
+            const double t = static_cast<double>(segment_idx) / static_cast<double>(looped_lightning_curve_segments);
+            const double one_minus_t = 1.0 - t;
+            const Point2LL curve_point
+                = source * (one_minus_t * one_minus_t) + control * (2.0 * one_minus_t * t) + target * (t * t);
+            closure.push_back(curve_point);
+        }
+        closures.push_back(std::move(closure), CheckNonEmptyParam::OnlyIfValid);
+    }
+
+    result_lines.push_back(std::move(closures));
+    // Curves can bulge out of concave islands. Clip everything back to the valid infill region.
+    result_lines = limit_to_outline.intersection(result_lines);
+}
+} // namespace
+
 // Returns 'added someting'.
 OpenLinesSet LightningLayer::convertToLines(const Shape& limit_to_outline, const coord_t line_width) const
 {
@@ -230,6 +327,7 @@ OpenLinesSet LightningLayer::convertToLines(const Shape& limit_to_outline, const
         tree->convertToPolylines(result_lines, line_width);
     }
     result_lines = limit_to_outline.intersection(result_lines);
+    addLoopedLightningClosures(result_lines, limit_to_outline, line_width);
 
     return result_lines;
 }
