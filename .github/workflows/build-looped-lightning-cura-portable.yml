@@ -47,8 +47,11 @@ jobs:
           Expand-Archive -Path $zip -DestinationPath $out -Force
           $engine = Get-ChildItem -Path $out -Recurse -Filter CuraEngine.exe | Select-Object -First 1
           if (-not $engine) { throw 'CuraEngine.exe was not found in the downloaded artifact.' }
-          Copy-Item $engine.FullName (Join-Path $out 'CuraEngine.exe') -Force
-          Get-FileHash (Join-Path $out 'CuraEngine.exe') -Algorithm SHA256
+          $canonicalEngine = Join-Path $out 'CuraEngine.exe'
+          if ($engine.FullName -ne $canonicalEngine) {
+            Copy-Item $engine.FullName $canonicalEngine -Force
+          }
+          Get-FileHash $canonicalEngine -Algorithm SHA256
 
       - name: Prepare Cura installer Conan profile
         id: set-overrides
