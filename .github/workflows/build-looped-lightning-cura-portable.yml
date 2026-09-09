@@ -66,7 +66,11 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $profile = '${{ steps.set-overrides.outputs.profile }}'
           Write-Host "Patching Conan profile: $profile"
-          Add-Content -Path $profile -Value "`n[options]`n*:enable_sentry=False`n*:sentry_enabled=False`n*:with_sentry=False"
+          $text = Get-Content -Path $profile -Raw
+          $text = $text -replace 'arcus/\*:enable_sentry=True', 'arcus/*:enable_sentry=False'
+          $text = $text -replace 'clipper/\*:enable_sentry=True', 'clipper/*:enable_sentry=False'
+          $text = $text -replace 'curaengine/\*:enable_sentry=True', 'curaengine/*:enable_sentry=False'
+          Set-Content -Path $profile -Value $text -Encoding ASCII
           Get-Content $profile
 
       - name: Gather and build Cura packages
