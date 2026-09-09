@@ -64,7 +64,11 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          $profile = '${{ steps.set-overrides.outputs.profile }}'
+          $pydir = Get-Content pydir.txt
+          $env:PATH += ";$pydir;$pydir/Scripts"
+          $profileName = '${{ steps.set-overrides.outputs.profile }}'
+          $profile = (conan profile path $profileName).Trim()
+          if (-not (Test-Path $profile)) { throw "Conan profile not found: $profile" }
           Write-Host "Patching Conan profile: $profile"
           $text = Get-Content -Path $profile -Raw
           $text = $text -replace 'arcus/\*:enable_sentry=True', 'arcus/*:enable_sentry=False'
