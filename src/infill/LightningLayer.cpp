@@ -219,7 +219,7 @@ void LightningLayer::reconnectRoots(
 
 namespace
 {
-constexpr coord_t looped_lightning_max_distance = 12000; // 12 mm in CuraEngine's micron coordinate system.
+constexpr coord_t looped_lightning_max_distance = 50000; // 50 mm in CuraEngine's micron coordinate system.
 constexpr size_t looped_lightning_curve_segments = 6;
 
 /*!
@@ -227,7 +227,7 @@ constexpr size_t looped_lightning_curve_segments = 6;
  *
  * LightningTreeNode::convertToPolylines() emits polylines beginning at a leaf.
  * For each leaf we look for the nearest point on another Lightning polyline and
- * compare that with the nearest model boundary. If either is within 12 mm, add
+ * compare that with the nearest model boundary. If either is within 50 mm, add
  * a short quadratic Bezier connector. The initial tangent continues away from
  * the existing branch so the closure forms a flowing hook rather than a hard
  * V-shaped reversal.
