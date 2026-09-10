@@ -214,16 +214,86 @@ void LightningLayer::reconnectRoots(
 namespace
 {
 constexpr coord_t looped_lightning_max_distance = 50000; // 50 mm test reach.
-constexpr size_t looped_lightning_curve_segments = 14;
+constexpr size_t looped_lightning_curve_segments = 18;
+
+struct LoopedLightningTarget
+{
+    Point2LL point;
+    Point2LL tangent;
+    coord_t distance;
+    bool has_tangent;
+};
 
 /*!
- * Add visibly swept return paths to dangling Lightning leaves.
+ * Find the nearest usable point on another Lightning polyline, not merely the
+ * nearest stored vertex.  This is important for the looped-lightning idea:
+ * the middle of an existing branch is valid structure and should be available
+ * as a landing point for a returning leaf.
+ */
+LoopedLightningTarget findLoopedLightningTarget(
+    const OpenLinesSet& lines,
+    const size_t source_line_idx,
+    const Point2LL& source,
+    const Shape& limit_to_outline)
+{
+    LoopedLightningTarget best{ PolygonUtils::findClosest(source, limit_to_outline).p(), Point2LL(0, 0), 0, false };
+    best.distance = vSize(best.point - source);
+
+    for (size_t candidate_line_idx = 0; candidate_line_idx < lines.size(); ++candidate_line_idx)
+    {
+        if (candidate_line_idx == source_line_idx)
+        {
+            continue;
+        }
+
+        const OpenPolyline& candidate_line = lines[candidate_line_idx];
+        if (candidate_line.size() < 2)
+        {
+            continue;
+        }
+
+        for (size_t segment_idx = 1; segment_idx < candidate_line.size(); ++segment_idx)
+        {
+            const Point2LL a = candidate_line[segment_idx - 1];
+            const Point2LL b = candidate_line[segment_idx];
+            const Point2LL ab = b - a;
+            const double length_squared = static_cast<double>(ab.X) * static_cast<double>(ab.X)
+                                        + static_cast<double>(ab.Y) * static_cast<double>(ab.Y);
+            if (length_squared <= 0.0)
+            {
+                continue;
+            }
+
+            const Point2LL ap = source - a;
+            double t = (static_cast<double>(ap.X) * static_cast<double>(ab.X)
+                      + static_cast<double>(ap.Y) * static_cast<double>(ab.Y)) / length_squared;
+            t = std::max(0.0, std::min(1.0, t));
+            const Point2LL candidate = a + ab * t;
+            const coord_t candidate_distance = vSize(candidate - source);
+
+            if (candidate_distance < best.distance)
+            {
+                best.point = candidate;
+                best.tangent = ab;
+                best.distance = candidate_distance;
+                best.has_tangent = true;
+            }
+        }
+    }
+
+    return best;
+}
+
+/*!
+ * Replace a dangling Lightning leaf with a flowing return to nearby existing
+ * structure.  The return leaves tangent to the source branch and, when it lands
+ * on another branch, arrives tangent to that branch as well.  The result is a
+ * connected loop rather than a dead-ended twig plus a straight stitch.
  *
- * This version intentionally exaggerates curvature for the experiment. Instead
- * of a single quadratic control point, it uses a cubic Bezier. The first control
- * point continues the leaf's existing tangent, while the second is displaced
- * sideways from the destination. That makes the path sweep out and curl back
- * rather than taking a nearly straight shortcut.
+ * The generated return remains part of result_lines, so subsequent closure
+ * passes can use an earlier return as a landing structure.  This lets the
+ * experimental network grow branch-to-return-to-branch rather than limiting
+ * connections to the original Lightning vertices.
  */
 void addLoopedLightningClosures(OpenLinesSet& result_lines, const Shape& limit_to_outline, const coord_t line_width)
 {
@@ -233,7 +303,6 @@ void addLoopedLightningClosures(OpenLinesSet& result_lines, const Shape& limit_t
     }
 
     const size_t original_line_count = result_lines.size();
-    OpenLinesSet closures;
 
     for (size_t line_idx = 0; line_idx < original_line_count; ++line_idx)
     {
@@ -244,36 +313,18 @@ void addLoopedLightningClosures(OpenLinesSet& result_lines, const Shape& limit_t
         }
 
         const Point2LL source = source_line.front();
-        Point2LL target = PolygonUtils::findClosest(source, limit_to_outline).p();
-        coord_t best_distance = vSize(target - source);
-
-        for (size_t candidate_line_idx = 0; candidate_line_idx < original_line_count; ++candidate_line_idx)
-        {
-            if (candidate_line_idx == line_idx)
-            {
-                continue;
-            }
-
-            const OpenPolyline& candidate_line = result_lines[candidate_line_idx];
-            for (const Point2LL& candidate : candidate_line)
-            {
-                const coord_t candidate_distance = vSize(candidate - source);
-                if (candidate_distance < best_distance)
-                {
-                    best_distance = candidate_distance;
-                    target = candidate;
-                }
-            }
-        }
+        const LoopedLightningTarget target_info = findLoopedLightningTarget(result_lines, line_idx, source, limit_to_outline);
+        const Point2LL target = target_info.point;
+        const coord_t best_distance = target_info.distance;
 
         if (best_distance > looped_lightning_max_distance || best_distance < line_width * 2)
         {
             continue;
         }
 
-        const Point2LL branch_outward = source - source_line[1];
-        const coord_t branch_length = vSize(branch_outward);
-        if (branch_length <= 0)
+        const Point2LL source_tangent = source - source_line[1];
+        const coord_t source_tangent_length = vSize(source_tangent);
+        if (source_tangent_length <= 0)
         {
             continue;
         }
@@ -285,16 +336,31 @@ void addLoopedLightningClosures(OpenLinesSet& result_lines, const Shape& limit_t
             continue;
         }
 
-        // First handle: continue naturally out of the Lightning leaf.
-        const double first_handle_scale = 0.55 * static_cast<double>(best_distance) / static_cast<double>(branch_length);
-        const Point2LL control1 = source + branch_outward * first_handle_scale;
+        const double source_handle_scale = 0.45 * static_cast<double>(best_distance) / static_cast<double>(source_tangent_length);
+        const Point2LL control1 = source + source_tangent * source_handle_scale;
 
-        // Second handle: approach the target from the side. Alternating the side
-        // by source-line index prevents every curl from leaning the same way.
-        const Point2LL perpendicular(-chord.Y, chord.X);
-        const double side = (line_idx % 2 == 0) ? 1.0 : -1.0;
-        const double side_scale = side * 0.38;
-        const Point2LL control2 = target - chord * 0.22 + perpendicular * side_scale;
+        Point2LL control2;
+        if (target_info.has_tangent)
+        {
+            Point2LL target_tangent = target_info.tangent;
+            // Pick the tangent direction that makes the Bezier approach the
+            // target rather than curl away from it.
+            if (target_tangent.X * chord.X + target_tangent.Y * chord.Y < 0)
+            {
+                target_tangent = Point2LL(-target_tangent.X, -target_tangent.Y);
+            }
+            const coord_t target_tangent_length = vSize(target_tangent);
+            const double target_handle_scale = 0.35 * static_cast<double>(best_distance) / static_cast<double>(target_tangent_length);
+            control2 = target - target_tangent * target_handle_scale;
+        }
+        else
+        {
+            // Boundary landing: use a broad side sweep so a wall return is still
+            // visibly curved instead of degenerating into a straight connector.
+            const Point2LL perpendicular(-chord.Y, chord.X);
+            const double side = (line_idx % 2 == 0) ? 1.0 : -1.0;
+            control2 = target - chord * 0.20 + perpendicular * (side * 0.28);
+        }
 
         OpenPolyline closure;
         for (size_t segment_idx = 0; segment_idx <= looped_lightning_curve_segments; ++segment_idx)
@@ -308,11 +374,10 @@ void addLoopedLightningClosures(OpenLinesSet& result_lines, const Shape& limit_t
                 + target * (t * t * t);
             closure.push_back(curve_point);
         }
-        closures.push_back(std::move(closure), CheckNonEmptyParam::OnlyIfValid);
-    }
 
-    result_lines.push_back(std::move(closures));
-    result_lines = limit_to_outline.intersection(result_lines);
+        OpenLinesSet clipped = limit_to_outline.intersection(OpenLinesSet{ closure });
+        result_lines.push_back(std::move(clipped));
+    }
 }
 } // namespace
 
