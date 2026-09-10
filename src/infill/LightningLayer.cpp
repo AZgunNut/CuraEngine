@@ -57,8 +57,6 @@ void LightningLayer::generateNewTrees(
     SparseLightningTreeNodeGrid tree_node_locator(locator_cell_size);
     fillLocator(tree_node_locator);
 
-    // Until no more points need to be added to support all:
-    // Determine next point from tree/outline areas via distance-field
     Point2LL unsupported_location;
     while (distance_field.tryGetNextPoint(&unsupported_location))
     {
@@ -74,7 +72,6 @@ void LightningLayer::generateNewTrees(
             tree_node_locator.insert(new_parent->getLocation(), new_parent);
         }
 
-        // update distance field
         distance_field.update(grounding_loc.p(), unsupported_location);
     }
 }
@@ -96,7 +93,7 @@ GroundingLocation LightningLayer::getBestGroundingLocation(
 
     LightningTreeNodeSPtr sub_tree{ nullptr };
     coord_t current_dist = getWeightedDistance(node_location, unsupported_location);
-    if (current_dist >= wall_supporting_radius) // Only reconnect tree roots to other trees if they are not already close to the outlines.
+    if (current_dist >= wall_supporting_radius)
     {
         auto candidate_trees = tree_node_locator.getNearbyVals(unsupported_location, std::min(current_dist, within_dist));
         for (auto& candidate_wptr : candidate_trees)
@@ -127,7 +124,6 @@ GroundingLocation LightningLayer::getBestGroundingLocation(
 
 bool LightningLayer::attach(const Point2LL& unsupported_location, const GroundingLocation& grounding_loc, LightningTreeNodeSPtr& new_child, LightningTreeNodeSPtr& new_root)
 {
-    // Update trees & distance fields.
     if (grounding_loc.boundary_location)
     {
         new_root = LightningTreeNode::create(grounding_loc.p(), std::make_optional(grounding_loc.p()));
@@ -172,21 +168,20 @@ void LightningLayer::reconnectRoots(
                     new_root->reroot();
 
                     tree_node_locator.insert(new_root->getLocation(), new_root);
-                    *old_root_it = std::move(new_root); // replace old root with new root
+                    *old_root_it = std::move(new_root);
                     continue;
                 }
             }
         }
 
-        const coord_t tree_connecting_ignore_width
-            = wall_supporting_radius - tree_connecting_ignore_offset; // Ideally, the boundary size in which the valence rule is ignored would be configurable.
+        const coord_t tree_connecting_ignore_width = wall_supporting_radius - tree_connecting_ignore_offset;
         GroundingLocation ground
             = getBestGroundingLocation(root_ptr->getLocation(), current_outlines, outline_locator, supporting_radius, tree_connecting_ignore_width, tree_node_locator, root_ptr);
         if (ground.boundary_location)
         {
             if (ground.boundary_location.value().p() == root_ptr->getLocation())
             {
-                continue; // Already on the boundary.
+                continue;
             }
 
             auto new_root = LightningTreeNode::create(ground.p(), ground.p());
@@ -196,7 +191,7 @@ void LightningLayer::reconnectRoots(
             new_root->addChild(attach_ptr);
             tree_node_locator.insert(new_root->getLocation(), new_root);
 
-            *old_root_it = std::move(new_root); // replace old root with new root
+            *old_root_it = std::move(new_root);
         }
         else
         {
@@ -210,7 +205,6 @@ void LightningLayer::reconnectRoots(
 
             ground.tree_node->addChild(attach_ptr);
 
-            // remove old root
             *old_root_it = std::move(tree_roots.back());
             tree_roots.pop_back();
         }
@@ -219,22 +213,17 @@ void LightningLayer::reconnectRoots(
 
 namespace
 {
-constexpr coord_t looped_lightning_max_distance = 50000; // 50 mm in CuraEngine's micron coordinate system.
-constexpr size_t looped_lightning_curve_segments = 6;
+constexpr coord_t looped_lightning_max_distance = 50000; // 50 mm test reach.
+constexpr size_t looped_lightning_curve_segments = 14;
 
 /*!
- * Close dangling Lightning polylines toward nearby infill or the island boundary.
+ * Add visibly swept return paths to dangling Lightning leaves.
  *
- * LightningTreeNode::convertToPolylines() emits polylines beginning at a leaf.
- * For each leaf we look for the nearest point on another Lightning polyline and
- * compare that with the nearest model boundary. If either is within 50 mm, add
- * a short quadratic Bezier connector. The initial tangent continues away from
- * the existing branch so the closure forms a flowing hook rather than a hard
- * V-shaped reversal.
- *
- * This is deliberately a small proof of concept. Later versions can replace
- * the vertex-only target search with nearest-point-on-segment indexing and make
- * the distance/curvature user settings.
+ * This version intentionally exaggerates curvature for the experiment. Instead
+ * of a single quadratic control point, it uses a cubic Bezier. The first control
+ * point continues the leaf's existing tangent, while the second is displaced
+ * sideways from the destination. That makes the path sweep out and curl back
+ * rather than taking a nearly straight shortcut.
  */
 void addLoopedLightningClosures(OpenLinesSet& result_lines, const Shape& limit_to_outline, const coord_t line_width)
 {
@@ -254,11 +243,10 @@ void addLoopedLightningClosures(OpenLinesSet& result_lines, const Shape& limit_t
             continue;
         }
 
-        const Point2LL source = source_line.front(); // Lightning polylines begin at leaves.
+        const Point2LL source = source_line.front();
         Point2LL target = PolygonUtils::findClosest(source, limit_to_outline).p();
         coord_t best_distance = vSize(target - source);
 
-        // Prefer another piece of Lightning if it is nearer than the wall.
         for (size_t candidate_line_idx = 0; candidate_line_idx < original_line_count; ++candidate_line_idx)
         {
             if (candidate_line_idx == line_idx)
@@ -278,7 +266,6 @@ void addLoopedLightningClosures(OpenLinesSet& result_lines, const Shape& limit_t
             }
         }
 
-        // Ignore long closures and tiny hooks that would only over-extrude a junction.
         if (best_distance > looped_lightning_max_distance || best_distance < line_width * 2)
         {
             continue;
@@ -286,29 +273,45 @@ void addLoopedLightningClosures(OpenLinesSet& result_lines, const Shape& limit_t
 
         const Point2LL branch_outward = source - source_line[1];
         const coord_t branch_length = vSize(branch_outward);
-
-        Point2LL control = (source + target) / 2;
-        if (branch_length > 0)
+        if (branch_length <= 0)
         {
-            // Continue the leaf tangent for roughly one third of the closure length.
-            const double tangent_scale = 0.35 * static_cast<double>(best_distance) / static_cast<double>(branch_length);
-            control = source + branch_outward * tangent_scale;
+            continue;
         }
+
+        const Point2LL chord = target - source;
+        const coord_t chord_length = vSize(chord);
+        if (chord_length <= 0)
+        {
+            continue;
+        }
+
+        // First handle: continue naturally out of the Lightning leaf.
+        const double first_handle_scale = 0.55 * static_cast<double>(best_distance) / static_cast<double>(branch_length);
+        const Point2LL control1 = source + branch_outward * first_handle_scale;
+
+        // Second handle: approach the target from the side. Alternating the side
+        // by source-line index prevents every curl from leaning the same way.
+        const Point2LL perpendicular(-chord.Y, chord.X);
+        const double side = (line_idx % 2 == 0) ? 1.0 : -1.0;
+        const double side_scale = side * 0.38;
+        const Point2LL control2 = target - chord * 0.22 + perpendicular * side_scale;
 
         OpenPolyline closure;
         for (size_t segment_idx = 0; segment_idx <= looped_lightning_curve_segments; ++segment_idx)
         {
             const double t = static_cast<double>(segment_idx) / static_cast<double>(looped_lightning_curve_segments);
-            const double one_minus_t = 1.0 - t;
+            const double u = 1.0 - t;
             const Point2LL curve_point
-                = source * (one_minus_t * one_minus_t) + control * (2.0 * one_minus_t * t) + target * (t * t);
+                = source * (u * u * u)
+                + control1 * (3.0 * u * u * t)
+                + control2 * (3.0 * u * t * t)
+                + target * (t * t * t);
             closure.push_back(curve_point);
         }
         closures.push_back(std::move(closure), CheckNonEmptyParam::OnlyIfValid);
     }
 
     result_lines.push_back(std::move(closures));
-    // Curves can bulge out of concave islands. Clip everything back to the valid infill region.
     result_lines = limit_to_outline.intersection(result_lines);
 }
 } // namespace
