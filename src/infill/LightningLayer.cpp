@@ -231,5 +231,54 @@ OpenLinesSet LightningLayer::convertToLines(const Shape& limit_to_outline, const
     }
     result_lines = limit_to_outline.intersection(result_lines);
 
+    // Proof of concept: keep Cura's Lightning tree exactly as generated, then
+    // connect each dangling polyline leaf to the nearest node on a different
+    // original Lightning polyline. No wall targets, no curves, and newly added
+    // connectors are never considered as targets.
+    constexpr coord_t max_loop_reach = 12000; // 12 mm in Cura coordinates.
+    const OpenLinesSet original_lines = result_lines;
+    for (size_t source_idx = 0; source_idx < original_lines.size(); ++source_idx)
+    {
+        const OpenPolyline& source_line = original_lines[source_idx];
+        if (source_line.size() < 2)
+        {
+            continue;
+        }
+
+        const Point2LL source = source_line.front();
+        Point2LL best_target;
+        coord_t best_distance = max_loop_reach + 1;
+        bool found_target = false;
+
+        for (size_t target_idx = 0; target_idx < original_lines.size(); ++target_idx)
+        {
+            if (target_idx == source_idx)
+            {
+                continue;
+            }
+
+            for (const Point2LL& candidate : original_lines[target_idx])
+            {
+                const coord_t distance = vSize(candidate - source);
+                if (distance >= line_width * 2 && distance < best_distance)
+                {
+                    best_distance = distance;
+                    best_target = candidate;
+                    found_target = true;
+                }
+            }
+        }
+
+        if (! found_target || best_distance > max_loop_reach)
+        {
+            continue;
+        }
+
+        OpenLinesSet connector;
+        connector.addSegment(source, best_target);
+        OpenLinesSet clipped_connector = limit_to_outline.intersection(connector);
+        result_lines.push_back(std::move(clipped_connector));
+    }
+
     return result_lines;
 }
