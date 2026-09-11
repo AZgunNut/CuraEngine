@@ -40,6 +40,15 @@ LightningGenerator::LightningGenerator(const SliceMeshStorage& mesh)
     const auto prune_angle = infill_extruder.settings_.get<AngleRadians>("lightning_infill_prune_angle");
     const auto straightening_angle = infill_extruder.settings_.get<AngleRadians>("lightning_infill_straightening_angle");
 
+    if (mesh.settings.has("lightning_experimental_variant", true))
+    {
+        experimental_variant = mesh.settings.get<int>("lightning_experimental_variant");
+        if (experimental_variant < 0 || experimental_variant > 22)
+        {
+            experimental_variant = 0;
+        }
+    }
+
     std::vector<Shape> areas_per_layer;
     areas_per_layer.reserve(mesh.layers.size());
     for (const SliceLayer& current_layer : mesh.layers)
@@ -62,6 +71,9 @@ LightningGenerator::LightningGenerator(const SupportStorage& support)
     {
         return;
     }
+
+    // Keep support-lightning on stock behavior for this experiment.
+    experimental_variant = 0;
 
     const Settings& settings = Application::getInstance().current_slice_->scene.current_mesh_group->settings;
     const auto support_extruder = settings.get<ExtruderTrain&>("support_extruder_nr");
@@ -156,6 +168,8 @@ void LightningGenerator::generateTrees(const coord_t infill_wall_thickness, cons
     for (int layer_id = top_layer_id; layer_id >= 0; layer_id--)
     {
         LightningLayer& current_lightning_layer = lightning_layers[layer_id];
+        current_lightning_layer.experimental_variant = experimental_variant;
+
         Shape& current_outlines = infill_outlines[layer_id];
         const auto& outlines_locator = *outlines_locator_ptr;
 
