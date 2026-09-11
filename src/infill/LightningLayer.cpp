@@ -231,17 +231,16 @@ OpenLinesSet LightningLayer::convertToLines(const Shape& limit_to_outline, const
      * Cura's native Lightning structure is deliberately left untouched above.
      * Each native dangling leaf already supplies the first leg of the proposed U.
      * Here we give that same unsupported leaf a second leg, aimed at the closest
-     * usable point on another Lightning segment.  In extrusion geometry the two
+     * usable point on another Lightning segment. In extrusion geometry the two
      * legs share the unsupported point, so the result is a U rather than a twig
      * with an unrelated closure added somewhere else.
      *
-     * The second leg is a quadratic Bezier.  Its control point continues away
-     * from the first leg before bending toward the second support.  A 3.0 mm
-     * minimum centerline bend radius is used as the design floor for this POC;
-     * candidates too close to make a 6 mm diameter turn are rejected.
+     * The important geometric floor for this POC is separation, not a prescribed
+     * bend radius: the second landing point must be at least 3.0 mm from the
+     * unsupported point. This directly prevents the two U legs from collapsing
+     * into a nearly coincident hairpin while letting the curve find its own radius.
      */
-    constexpr coord_t u_min_radius = 3000; // 3.0 mm in Cura's micron coordinates.
-    constexpr coord_t u_min_diameter = u_min_radius * 2;
+    constexpr coord_t u_min_separation = 3000; // 3.0 mm in Cura's micron coordinates.
     constexpr coord_t u_max_reach = 50000; // Generous POC reach; nearest valid target still wins.
     constexpr size_t u_curve_segments = 16;
 
@@ -279,9 +278,10 @@ OpenLinesSet LightningLayer::convertToLines(const Shape& limit_to_outline, const
                 const Point2LL candidate = LinearAlg2D::getClosestOnLineSegment(source, target_line[segment_idx - 1], target_line[segment_idx]);
                 const coord_t distance = vSize(candidate - source);
 
-                // Six millimetres gives a 3 mm-radius U room to turn instead of
-                // collapsing into a sharp hairpin at the unsupported point.
-                if (distance >= u_min_diameter && distance < best_distance)
+                // Keep the two U landings at least 3 mm apart. This is the actual
+                // topology constraint we care about; curvature is allowed to follow
+                // naturally from the selected geometry.
+                if (distance >= u_min_separation && distance < best_distance)
                 {
                     best_target = candidate;
                     best_distance = distance;
@@ -295,10 +295,11 @@ OpenLinesSet LightningLayer::convertToLines(const Shape& limit_to_outline, const
             continue;
         }
 
-        // Continue away from the existing first leg by one radius before
-        // steering toward the second target.  This is intentionally simple for
-        // the POC: prove paired-U topology first, then refine curvature scoring.
-        const double handle_scale = static_cast<double>(u_min_radius) / static_cast<double>(first_leg_length);
+        // Continue away from the existing first leg before steering toward the
+        // second landing point. Use half the landing separation as a simple POC
+        // handle length; there is no hard bend-radius requirement in this version.
+        const double handle_length = 0.5 * static_cast<double>(best_distance);
+        const double handle_scale = handle_length / static_cast<double>(first_leg_length);
         const Point2LL control = source - first_leg * handle_scale;
 
         OpenPolyline second_leg;
