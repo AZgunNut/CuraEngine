@@ -36,6 +36,9 @@ class LightningLayer
 public:
     std::vector<LightningTreeNodeSPtr> tree_roots;
 
+    // 0 = stock Cura Lightning; 1..22 = selectable experimental variants.
+    int experimental_variant{ 0 };
+
     void generateNewTrees(
         const Shape& current_overhang,
         const Shape& current_outlines,
