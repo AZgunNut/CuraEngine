@@ -232,9 +232,9 @@ OpenLinesSet LightningLayer::convertToLines(const Shape& limit_to_outline, const
     result_lines = limit_to_outline.intersection(result_lines);
 
     // Proof of concept: keep Cura's Lightning tree exactly as generated, then
-    // connect each dangling polyline leaf to the nearest node on a different
-    // original Lightning polyline. No wall targets, no curves, and newly added
-    // connectors are never considered as targets.
+    // connect each dangling polyline leaf to the nearest point anywhere along
+    // a segment of a different original Lightning polyline. No wall targets,
+    // no curves, and newly added connectors are never considered as targets.
     constexpr coord_t max_loop_reach = 12000; // 12 mm in Cura coordinates.
     const OpenLinesSet original_lines = result_lines;
     for (size_t source_idx = 0; source_idx < original_lines.size(); ++source_idx)
@@ -257,8 +257,15 @@ OpenLinesSet LightningLayer::convertToLines(const Shape& limit_to_outline, const
                 continue;
             }
 
-            for (const Point2LL& candidate : original_lines[target_idx])
+            const OpenPolyline& target_line = original_lines[target_idx];
+            if (target_line.size() < 2)
             {
+                continue;
+            }
+
+            for (size_t segment_idx = 1; segment_idx < target_line.size(); ++segment_idx)
+            {
+                const Point2LL candidate = LinearAlg2D::getClosestOnLineSegment(source, target_line[segment_idx - 1], target_line[segment_idx]);
                 const coord_t distance = vSize(candidate - source);
                 if (distance >= line_width * 2 && distance < best_distance)
                 {
