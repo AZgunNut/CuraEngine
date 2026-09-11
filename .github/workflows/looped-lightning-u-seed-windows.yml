@@ -1,0 +1,60 @@
+name: looped-lightning-u-seed-windows
+
+on:
+  push:
+    branches:
+      - CURA-looped-lightning-u-seed-poc
+    paths:
+      - 'include/**'
+      - 'src/**'
+      - 'conanfile.py'
+      - 'conandata.yml'
+      - 'CMakeLists.txt'
+      - '.github/workflows/looped-lightning-u-seed-windows.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Set up CuraEngine build environment
+        uses: ultimaker/cura-workflows/.github/actions/setup-build-environment@main
+        with:
+          repository: AZgunNut/CuraEngine
+          branch: CURA-looped-lightning-u-seed-poc
+          repository_path: CuraEngine
+          install_system_dependencies: false
+
+      - name: Build CuraEngine
+        shell: bash
+        working-directory: CuraEngine
+        run: |
+          conan create . --build=missing -c tools.build:skip_test=True
+
+      - name: Collect CuraEngine executable
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path artifact | Out-Null
+          $matches = Get-ChildItem "$env:USERPROFILE\.conan2" -Recurse -Filter CuraEngine.exe -ErrorAction SilentlyContinue
+          if (-not $matches) {
+            throw "CuraEngine.exe was not found in the Conan cache"
+          }
+          $engine = $matches | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          Copy-Item $engine.FullName artifact\CuraEngine.exe
+          Set-Content -Path artifact\BUILD_INFO.txt -Value @(
+            "Looped Lightning U-seed experimental CuraEngine",
+            "Branch: CURA-looped-lightning-u-seed-poc",
+            "Commit: $env:GITHUB_SHA",
+            "Built: $(Get-Date -Format o)"
+          )
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: looped-lightning-u-seed-curaengine-windows
+          path: artifact/
+          if-no-files-found: error
