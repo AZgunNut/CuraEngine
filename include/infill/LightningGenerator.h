@@ -104,6 +104,10 @@ protected:
      */
     void generateTrees(const coord_t infill_wall_thickness, const std::vector<Shape>& areas_per_layer);
 
+    // Experimental output selector for ordinary mesh Lightning infill.
+    // 0 means stock; 1..22 map to the test variants.
+    int experimental_variant{ 0 };
+
     /*!
      * How far each piece of infill can support skin in the layer above.
      */
