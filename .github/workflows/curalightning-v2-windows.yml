@@ -53,10 +53,13 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path v2-stage\engine | Out-Null
-          $matches = Get-ChildItem "$env:USERPROFILE\.conan2" -Recurse -Filter CuraEngine.exe -ErrorAction SilentlyContinue
-          if (-not $matches) { throw 'CuraEngine.exe was not found in the Conan cache' }
-          $engine = $matches | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-          Copy-Item $engine.FullName v2-stage\engine\CuraEngine.exe
+          $matches = @(Get-ChildItem "$env:USERPROFILE\.conan2" -Recurse -Filter CuraEngine.exe -File -ErrorAction SilentlyContinue)
+          if ($matches.Count -eq 0) { throw 'CuraEngine.exe was not found in the Conan cache' }
+          Write-Host "Found $($matches.Count) CuraEngine.exe candidate(s)."
+          $engine = $matches | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+          Write-Host "Using CuraEngine.exe: $($engine.FullName)"
+          Write-Host "LastWriteTimeUtc: $($engine.LastWriteTimeUtc.ToString('o'))"
+          Copy-Item -LiteralPath $engine.FullName -Destination v2-stage\engine\CuraEngine.exe -Force
           Get-FileHash v2-stage\engine\CuraEngine.exe -Algorithm SHA256 | Format-List
 
       - name: Fetch matching Cura frontend
