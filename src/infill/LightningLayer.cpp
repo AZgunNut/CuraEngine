@@ -56,8 +56,6 @@ void LightningLayer::generateNewTrees(
     SparseLightningTreeNodeGrid tree_node_locator(locator_cell_size);
     fillLocator(tree_node_locator);
 
-    // Until no more points need to be added to support all:
-    // Determine next point from tree/outline areas via distance-field
     Point2LL unsupported_location;
     while (distance_field.tryGetNextPoint(&unsupported_location))
     {
@@ -73,7 +71,6 @@ void LightningLayer::generateNewTrees(
             tree_node_locator.insert(new_parent->getLocation(), new_parent);
         }
 
-        // update distance field
         distance_field.update(grounding_loc.p(), unsupported_location);
     }
 }
@@ -95,7 +92,7 @@ GroundingLocation LightningLayer::getBestGroundingLocation(
 
     LightningTreeNodeSPtr sub_tree{ nullptr };
     coord_t current_dist = getWeightedDistance(node_location, unsupported_location);
-    if (current_dist >= wall_supporting_radius) // Only reconnect tree roots to other trees if they are not already close to the outlines.
+    if (current_dist >= wall_supporting_radius)
     {
         auto candidate_trees = tree_node_locator.getNearbyVals(unsupported_location, std::min(current_dist, within_dist));
         for (auto& candidate_wptr : candidate_trees)
@@ -126,7 +123,6 @@ GroundingLocation LightningLayer::getBestGroundingLocation(
 
 bool LightningLayer::attach(const Point2LL& unsupported_location, const GroundingLocation& grounding_loc, LightningTreeNodeSPtr& new_child, LightningTreeNodeSPtr& new_root)
 {
-    // Update trees & distance fields.
     if (grounding_loc.boundary_location)
     {
         new_root = LightningTreeNode::create(grounding_loc.p(), std::make_optional(grounding_loc.p()));
@@ -171,21 +167,20 @@ void LightningLayer::reconnectRoots(
                     new_root->reroot();
 
                     tree_node_locator.insert(new_root->getLocation(), new_root);
-                    *old_root_it = std::move(new_root); // replace old root with new root
+                    *old_root_it = std::move(new_root);
                     continue;
                 }
             }
         }
 
-        const coord_t tree_connecting_ignore_width
-            = wall_supporting_radius - tree_connecting_ignore_offset; // Ideally, the boundary size in which the valence rule is ignored would be configurable.
+        const coord_t tree_connecting_ignore_width = wall_supporting_radius - tree_connecting_ignore_offset;
         GroundingLocation ground
             = getBestGroundingLocation(root_ptr->getLocation(), current_outlines, outline_locator, supporting_radius, tree_connecting_ignore_width, tree_node_locator, root_ptr);
         if (ground.boundary_location)
         {
             if (ground.boundary_location.value().p() == root_ptr->getLocation())
             {
-                continue; // Already on the boundary.
+                continue;
             }
 
             auto new_root = LightningTreeNode::create(ground.p(), ground.p());
@@ -195,7 +190,7 @@ void LightningLayer::reconnectRoots(
             new_root->addChild(attach_ptr);
             tree_node_locator.insert(new_root->getLocation(), new_root);
 
-            *old_root_it = std::move(new_root); // replace old root with new root
+            *old_root_it = std::move(new_root);
         }
         else
         {
@@ -209,7 +204,6 @@ void LightningLayer::reconnectRoots(
 
             ground.tree_node->addChild(attach_ptr);
 
-            // remove old root
             *old_root_it = std::move(tree_roots.back());
             tree_roots.pop_back();
         }
@@ -230,6 +224,95 @@ OpenLinesSet LightningLayer::convertToLines(const Shape& limit_to_outline, const
         tree->convertToPolylines(result_lines, line_width);
     }
     result_lines = limit_to_outline.intersection(result_lines);
+
+    /*
+     * Looped-Lightning U-seed proof of concept.
+     *
+     * Cura's native Lightning structure is deliberately left untouched above.
+     * Each native dangling leaf already supplies the first leg of the proposed U.
+     * Here we give that same unsupported leaf a second leg, aimed at the closest
+     * usable point on another Lightning segment.  In extrusion geometry the two
+     * legs share the unsupported point, so the result is a U rather than a twig
+     * with an unrelated closure added somewhere else.
+     *
+     * The second leg is a quadratic Bezier.  Its control point continues away
+     * from the first leg before bending toward the second support.  A 3.0 mm
+     * minimum centerline bend radius is used as the design floor for this POC;
+     * candidates too close to make a 6 mm diameter turn are rejected.
+     */
+    constexpr coord_t u_min_radius = 3000; // 3.0 mm in Cura's micron coordinates.
+    constexpr coord_t u_min_diameter = u_min_radius * 2;
+    constexpr coord_t u_max_reach = 50000; // Generous POC reach; nearest valid target still wins.
+    constexpr size_t u_curve_segments = 16;
+
+    const OpenLinesSet original_lines = result_lines;
+    for (size_t source_idx = 0; source_idx < original_lines.size(); ++source_idx)
+    {
+        const OpenPolyline& source_line = original_lines[source_idx];
+        if (source_line.size() < 2)
+        {
+            continue;
+        }
+
+        const Point2LL source = source_line.front();
+        const Point2LL first_leg = source_line[1] - source;
+        const coord_t first_leg_length = vSize(first_leg);
+        if (first_leg_length <= 0)
+        {
+            continue;
+        }
+
+        Point2LL best_target;
+        coord_t best_distance = u_max_reach + 1;
+        bool found_target = false;
+
+        for (size_t target_idx = 0; target_idx < original_lines.size(); ++target_idx)
+        {
+            if (target_idx == source_idx || original_lines[target_idx].size() < 2)
+            {
+                continue;
+            }
+
+            const OpenPolyline& target_line = original_lines[target_idx];
+            for (size_t segment_idx = 1; segment_idx < target_line.size(); ++segment_idx)
+            {
+                const Point2LL candidate = LinearAlg2D::getClosestOnLineSegment(source, target_line[segment_idx - 1], target_line[segment_idx]);
+                const coord_t distance = vSize(candidate - source);
+
+                // Six millimetres gives a 3 mm-radius U room to turn instead of
+                // collapsing into a sharp hairpin at the unsupported point.
+                if (distance >= u_min_diameter && distance < best_distance)
+                {
+                    best_target = candidate;
+                    best_distance = distance;
+                    found_target = true;
+                }
+            }
+        }
+
+        if (! found_target || best_distance > u_max_reach)
+        {
+            continue;
+        }
+
+        // Continue away from the existing first leg by one radius before
+        // steering toward the second target.  This is intentionally simple for
+        // the POC: prove paired-U topology first, then refine curvature scoring.
+        const double handle_scale = static_cast<double>(u_min_radius) / static_cast<double>(first_leg_length);
+        const Point2LL control = source - first_leg * handle_scale;
+
+        OpenPolyline second_leg;
+        for (size_t segment_idx = 0; segment_idx <= u_curve_segments; ++segment_idx)
+        {
+            const double t = static_cast<double>(segment_idx) / static_cast<double>(u_curve_segments);
+            const double omt = 1.0 - t;
+            const Point2LL curve_point = source * (omt * omt) + control * (2.0 * omt * t) + best_target * (t * t);
+            second_leg.push_back(curve_point);
+        }
+
+        OpenLinesSet clipped = limit_to_outline.intersection(OpenLinesSet{ second_leg });
+        result_lines.push_back(std::move(clipped));
+    }
 
     return result_lines;
 }
