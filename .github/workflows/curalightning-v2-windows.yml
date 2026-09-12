@@ -70,20 +70,27 @@ jobs:
           Copy-Item -LiteralPath $engine.FullName -Destination $engineOut -Force
           Get-FileHash -LiteralPath $engineOut -Algorithm SHA256 | Format-List
 
-      - name: Fetch clean Cura frontend
+      - name: Fetch pinned Cura frontend
         shell: pwsh
         run: |
           $frontend = 'v2-cura-frontend'
+          $curaCommit = '2acc146f0e1c044708ff58baf2c0672d9c0baf36'
           if (Test-Path -LiteralPath $frontend) {
             Write-Host "Removing pre-existing frontend directory: $frontend"
             Remove-Item -LiteralPath $frontend -Recurse -Force
           }
           if (Test-Path -LiteralPath $frontend) { throw "Could not clear frontend directory: $frontend" }
-          git clone --depth 1 https://github.com/Ultimaker/Cura.git $frontend
-          if ($LASTEXITCODE -ne 0) { throw 'Cura frontend clone failed' }
+          git init $frontend
+          if ($LASTEXITCODE -ne 0) { throw 'Cura frontend git init failed' }
+          git -C $frontend remote add origin https://github.com/Ultimaker/Cura.git
+          if ($LASTEXITCODE -ne 0) { throw 'Cura frontend remote setup failed' }
+          git -C $frontend fetch --depth 1 origin $curaCommit
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned Cura frontend fetch failed' }
+          git -C $frontend checkout --detach FETCH_HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned Cura frontend checkout failed' }
           $curaSha = (git -C $frontend rev-parse HEAD).Trim()
-          if (-not $curaSha) { throw 'Could not determine Cura frontend commit' }
-          Write-Host "Cura frontend commit: $curaSha"
+          if ($curaSha -ne $curaCommit) { throw "Unexpected Cura frontend commit: $curaSha" }
+          Write-Host "Pinned Cura frontend commit: $curaSha"
           "CURA_FRONTEND_SHA=$curaSha" >> $env:GITHUB_ENV
 
       - name: Add CuraLightning controls to Cura frontend
