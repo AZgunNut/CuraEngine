@@ -62,40 +62,57 @@ jobs:
           Copy-Item -LiteralPath $engine.FullName -Destination v2-stage\engine\CuraEngine.exe -Force
           Get-FileHash v2-stage\engine\CuraEngine.exe -Algorithm SHA256 | Format-List
 
-      - name: Fetch matching Cura frontend
+      - name: Fetch clean Cura frontend
         shell: pwsh
         run: |
-          git clone --depth 1 https://github.com/Ultimaker/Cura.git CuraFrontend
-          git -C CuraFrontend rev-parse HEAD
+          $frontend = 'v2-cura-frontend'
+          if (Test-Path -LiteralPath $frontend) {
+            Write-Host "Removing pre-existing frontend directory: $frontend"
+            Remove-Item -LiteralPath $frontend -Recurse -Force
+          }
+          if (Test-Path -LiteralPath $frontend) { throw "Could not clear frontend directory: $frontend" }
+          git clone --depth 1 https://github.com/Ultimaker/Cura.git $frontend
+          if ($LASTEXITCODE -ne 0) { throw 'Cura frontend clone failed' }
+          $curaSha = (git -C $frontend rev-parse HEAD).Trim()
+          if (-not $curaSha) { throw 'Could not determine Cura frontend commit' }
+          Write-Host "Cura frontend commit: $curaSha"
+          "CURA_FRONTEND_SHA=$curaSha" >> $env:GITHUB_ENV
 
       - name: Add Stock plus Experimental 1 through 22 selector
         shell: pwsh
         run: |
-          python CuraEngine\tools\patch_cura_lightning_v2.py CuraFrontend
+          python CuraEngine\tools\patch_cura_lightning_v2.py v2-cura-frontend
+          if ($LASTEXITCODE -ne 0) { throw 'Cura frontend patch failed' }
 
       - name: Verify patched Cura resources
         shell: pwsh
         run: |
-          $definition = Get-Content CuraFrontend\resources\definitions\fdmprinter.def.json -Raw | ConvertFrom-Json
+          $definitionPath = 'v2-cura-frontend\resources\definitions\fdmprinter.def.json'
+          $visibilityPath = 'v2-cura-frontend\resources\setting_visibility\expert.cfg'
+          if (-not (Test-Path -LiteralPath $definitionPath)) { throw "Missing patched definition: $definitionPath" }
+          if (-not (Test-Path -LiteralPath $visibilityPath)) { throw "Missing expert visibility file: $visibilityPath" }
+          $definition = Get-Content $definitionPath -Raw | ConvertFrom-Json
           $setting = $definition.settings.infill.children.lightning_experimental_variant
           if ($null -eq $setting) { throw 'lightning_experimental_variant is missing from Cura resources' }
           if ($setting.options.PSObject.Properties.Count -ne 23) { throw 'Expected Stock plus 22 experimental choices' }
-          if (-not (Select-String -Path CuraFrontend\resources\setting_visibility\expert.cfg -Pattern '^lightning_experimental_variant$' -Quiet)) {
+          if (-not (Select-String -Path $visibilityPath -Pattern '^lightning_experimental_variant$' -Quiet)) {
             throw 'V2 selector is missing from expert visibility'
           }
+          Write-Host 'Verified Stock plus Experimental 1..22 selector.'
 
       - name: Stage V2 packaging inputs
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path v2-stage\cura-resources\definitions | Out-Null
           New-Item -ItemType Directory -Force -Path v2-stage\cura-resources\setting_visibility | Out-Null
-          Copy-Item CuraFrontend\resources\definitions\fdmprinter.def.json v2-stage\cura-resources\definitions\fdmprinter.def.json
-          Copy-Item CuraFrontend\resources\setting_visibility\expert.cfg v2-stage\cura-resources\setting_visibility\expert.cfg
+          Copy-Item v2-cura-frontend\resources\definitions\fdmprinter.def.json v2-stage\cura-resources\definitions\fdmprinter.def.json -Force
+          Copy-Item v2-cura-frontend\resources\setting_visibility\expert.cfg v2-stage\cura-resources\setting_visibility\expert.cfg -Force
           Set-Content -Path v2-stage\BUILD_INFO.txt -Value @(
             'CuraLightning V2 Windows packaging pipeline',
             'Selector: Stock + Experimental 1..22',
-            "CuraEngine branch: CURA-looped-lightning-proof-v2",
+            'CuraEngine branch: CURA-looped-lightning-proof-v2',
             "Pipeline commit: $env:GITHUB_SHA",
+            "Cura frontend commit: $env:CURA_FRONTEND_SHA",
             "Built: $(Get-Date -Format o)"
           )
 
