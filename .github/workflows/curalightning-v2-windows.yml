@@ -30,17 +30,22 @@ jobs:
           repository_path: CuraEngine
           install_system_dependencies: false
 
-      - name: Verify V2 source commit
+      - name: Verify CuraLightning controls source
         shell: pwsh
         working-directory: CuraEngine
         run: |
           $sha = (git rev-parse HEAD).Trim()
           Write-Host "CuraLightning V2 source commit: $sha"
-          if (-not (Select-String -Path 'src/infill/LightningGenerator.cpp' -Pattern 'lightning_experimental_variant' -Quiet)) {
-            throw 'V2 selector plumbing is missing from CuraEngine source'
+          foreach ($pattern in @('lightning_smoothing', 'lightning_offset_widths', 'lightning_single_path')) {
+            if (-not (Select-String -Path 'src/infill/LightningGenerator.cpp' -Pattern $pattern -Quiet)) {
+              throw "Missing CuraLightning generator control: $pattern"
+            }
+            if (-not (Select-String -Path 'src/infill/LightningLayer.cpp' -Pattern $pattern -Quiet)) {
+              throw "Missing CuraLightning layer control: $pattern"
+            }
           }
-          if (-not (Select-String -Path 'src/infill/LightningLayer.cpp' -Pattern 'experimental_variant == 21' -Quiet)) {
-            throw 'V2 experimental variants are missing from LightningLayer source'
+          if (-not (Select-String -Path 'src/infill/LightningLayer.cpp' -Pattern 'properSegmentsCross' -Quiet)) {
+            throw 'No-cross path protection is missing from LightningLayer source'
           }
 
       - name: Build CuraLightning V2 CuraEngine
@@ -81,7 +86,7 @@ jobs:
           Write-Host "Cura frontend commit: $curaSha"
           "CURA_FRONTEND_SHA=$curaSha" >> $env:GITHUB_ENV
 
-      - name: Add Stock plus Experimental 1 through 22 selector
+      - name: Add CuraLightning controls to Cura frontend
         shell: pwsh
         run: |
           python CuraEngine\tools\patch_cura_lightning_v2.py v2-cura-frontend
@@ -99,7 +104,8 @@ jobs:
           Copy-Item v2-cura-frontend\resources\setting_visibility\expert.cfg (Join-Path $visibilityDir 'expert.cfg') -Force
           Set-Content -Path (Join-Path $stage 'BUILD_INFO.txt') -Value @(
             'CuraLightning V2 Windows packaging pipeline',
-            'Selector: Stock + Experimental 1..22',
+            'Controls: smoothing 0..100; offset 0..100 extrusion widths; single path on/off',
+            'No-cross rule: enabled',
             'CuraEngine branch: CURA-looped-lightning-proof-v2',
             "Pipeline commit: $env:GITHUB_SHA",
             "Cura frontend commit: $env:CURA_FRONTEND_SHA",
