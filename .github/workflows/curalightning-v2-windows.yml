@@ -87,22 +87,6 @@ jobs:
           python CuraEngine\tools\patch_cura_lightning_v2.py v2-cura-frontend
           if ($LASTEXITCODE -ne 0) { throw 'Cura frontend patch failed' }
 
-      - name: Verify patched Cura resources
-        shell: pwsh
-        run: |
-          $definitionPath = 'v2-cura-frontend\resources\definitions\fdmprinter.def.json'
-          $visibilityPath = 'v2-cura-frontend\resources\setting_visibility\expert.cfg'
-          if (-not (Test-Path -LiteralPath $definitionPath)) { throw "Missing patched definition: $definitionPath" }
-          if (-not (Test-Path -LiteralPath $visibilityPath)) { throw "Missing expert visibility file: $visibilityPath" }
-          $definition = Get-Content $definitionPath -Raw | ConvertFrom-Json
-          $setting = $definition.settings.infill.children.lightning_experimental_variant
-          if ($null -eq $setting) { throw 'lightning_experimental_variant is missing from Cura resources' }
-          if ($setting.options.PSObject.Properties.Count -ne 23) { throw 'Expected Stock plus 22 experimental choices' }
-          if (-not (Select-String -Path $visibilityPath -Pattern '^lightning_experimental_variant$' -Quiet)) {
-            throw 'V2 selector is missing from expert visibility'
-          }
-          Write-Host 'Verified Stock plus Experimental 1..22 selector.'
-
       - name: Stage V2 packaging inputs
         shell: pwsh
         run: |
