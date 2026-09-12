@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Patch a Cura source/package tree with CuraLightning numeric controls.
+"""Patch a Cura source/package tree with CuraLightning controls.
 
-Adds two real-valued Lightning controls:
+Adds three Lightning controls:
 - lightning_smoothing: 0.0..100.0
 - lightning_offset_widths: 0.0..100.0 extrusion widths
+- lightning_single_path: on/off
 
 Usage:
     python tools/patch_cura_lightning_v2.py PATH_TO_CURA_ROOT
@@ -17,6 +18,7 @@ from pathlib import Path
 
 SMOOTHING_KEY = "lightning_smoothing"
 OFFSET_KEY = "lightning_offset_widths"
+SINGLE_PATH_KEY = "lightning_single_path"
 OLD_SELECTOR_KEY = "lightning_experimental_variant"
 
 
@@ -62,6 +64,15 @@ def patch_definition(path: Path) -> None:
         "settable_per_mesh": True,
     }
 
+    children[SINGLE_PATH_KEY] = {
+        "label": "Lightning Single Path",
+        "description": "When enabled, CuraLightning joins each generated Lightning pair into a continuous out-and-back path and attempts safe continuous routing without crossing another Lightning path.",
+        "type": "bool",
+        "default_value": False,
+        "enabled": "infill_pattern == 'lightning'",
+        "settable_per_mesh": True,
+    }
+
     with path.open("w", encoding="utf-8", newline="\n") as handle:
         json.dump(data, handle, indent=4, ensure_ascii=False)
         handle.write("\n")
@@ -80,7 +91,7 @@ def patch_visibility(path: Path) -> None:
     while insert_at < len(lines) and not lines[insert_at].startswith("["):
         insert_at += 1
 
-    for key in (SMOOTHING_KEY, OFFSET_KEY):
+    for key in (SMOOTHING_KEY, OFFSET_KEY, SINGLE_PATH_KEY):
         if key not in lines:
             lines.insert(insert_at, key)
             insert_at += 1
@@ -103,16 +114,22 @@ def main() -> int:
     with definition.open("r", encoding="utf-8") as handle:
         patched = json.load(handle)
     children = patched["settings"]["infill"]["children"]
-    for key in (SMOOTHING_KEY, OFFSET_KEY):
-        setting = children.get(key)
-        if not setting:
+
+    for key in (SMOOTHING_KEY, OFFSET_KEY, SINGLE_PATH_KEY):
+        if not children.get(key):
             raise RuntimeError(f"Missing CuraLightning control: {key}")
+
+    for key in (SMOOTHING_KEY, OFFSET_KEY):
+        setting = children[key]
         if setting.get("minimum_value") != 0.0 or setting.get("maximum_value") != 100.0:
             raise RuntimeError(f"Bad range for CuraLightning control: {key}")
 
+    if children[SINGLE_PATH_KEY].get("type") != "bool":
+        raise RuntimeError("Bad type for CuraLightning single-path control")
+
     print(f"Patched {definition}")
     print(f"Patched {visibility}")
-    print("Verified Lightning controls: smoothing 0..100; offset 0..100 line widths")
+    print("Verified Lightning controls: smoothing 0..100; offset 0..100 line widths; single path on/off")
     return 0
 
 
