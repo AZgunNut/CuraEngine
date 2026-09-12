@@ -52,15 +52,18 @@ jobs:
       - name: Collect exact CuraEngine executable
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path v2-stage\engine | Out-Null
+          $stage = Join-Path $env:GITHUB_WORKSPACE 'v2-stage'
+          $engineDir = Join-Path $stage 'engine'
+          $engineOut = Join-Path $engineDir 'CuraEngine.exe'
+          New-Item -ItemType Directory -Force -Path $engineDir | Out-Null
           $matches = @(Get-ChildItem "$env:USERPROFILE\.conan2" -Recurse -Filter CuraEngine.exe -File -ErrorAction SilentlyContinue)
           if ($matches.Count -eq 0) { throw 'CuraEngine.exe was not found in the Conan cache' }
           Write-Host "Found $($matches.Count) CuraEngine.exe candidate(s)."
           $engine = $matches | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
           Write-Host "Using CuraEngine.exe: $($engine.FullName)"
           Write-Host "LastWriteTimeUtc: $($engine.LastWriteTimeUtc.ToString('o'))"
-          Copy-Item -LiteralPath $engine.FullName -Destination v2-stage\engine\CuraEngine.exe -Force
-          Get-FileHash v2-stage\engine\CuraEngine.exe -Algorithm SHA256 | Format-List
+          Copy-Item -LiteralPath $engine.FullName -Destination $engineOut -Force
+          Get-FileHash -LiteralPath $engineOut -Algorithm SHA256 | Format-List
 
       - name: Fetch clean Cura frontend
         shell: pwsh
@@ -103,11 +106,14 @@ jobs:
       - name: Stage V2 packaging inputs
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path v2-stage\cura-resources\definitions | Out-Null
-          New-Item -ItemType Directory -Force -Path v2-stage\cura-resources\setting_visibility | Out-Null
-          Copy-Item v2-cura-frontend\resources\definitions\fdmprinter.def.json v2-stage\cura-resources\definitions\fdmprinter.def.json -Force
-          Copy-Item v2-cura-frontend\resources\setting_visibility\expert.cfg v2-stage\cura-resources\setting_visibility\expert.cfg -Force
-          Set-Content -Path v2-stage\BUILD_INFO.txt -Value @(
+          $stage = Join-Path $env:GITHUB_WORKSPACE 'v2-stage'
+          $definitionsDir = Join-Path $stage 'cura-resources\definitions'
+          $visibilityDir = Join-Path $stage 'cura-resources\setting_visibility'
+          New-Item -ItemType Directory -Force -Path $definitionsDir | Out-Null
+          New-Item -ItemType Directory -Force -Path $visibilityDir | Out-Null
+          Copy-Item v2-cura-frontend\resources\definitions\fdmprinter.def.json (Join-Path $definitionsDir 'fdmprinter.def.json') -Force
+          Copy-Item v2-cura-frontend\resources\setting_visibility\expert.cfg (Join-Path $visibilityDir 'expert.cfg') -Force
+          Set-Content -Path (Join-Path $stage 'BUILD_INFO.txt') -Value @(
             'CuraLightning V2 Windows packaging pipeline',
             'Selector: Stock + Experimental 1..22',
             'CuraEngine branch: CURA-looped-lightning-proof-v2',
@@ -120,5 +126,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: curalightningV2-windows-staging
-          path: v2-stage/
+          path: ${{ github.workspace }}/v2-stage/
           if-no-files-found: error
