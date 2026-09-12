@@ -12,27 +12,12 @@
 #include "utils/SparsePointGridInclusive.h"
 #include "utils/linearAlg2D.h"
 
-/* Possible future tasks/optimizations,etc.:
- * - Improve connecting heuristic to favor connecting to shorter trees
- * - Change which node of a tree is the root when that would be better in reconnectRoots.
- * - (For implementation in Infill classes & elsewhere): Outline offset, infill-overlap & perimeter gaps.
- * - Allow for polylines, i.e. merge Tims PR about polyline fixes
- * - Unit Tests?
- * - Optimization: let the square grid store the closest point on boundary
- * - Optimization: only compute the closest dist to / point on boundary for the outer cells and flood-fill the rest
- * - Make a pass with Arachne over the output. Somehow.
- * - Generate all to-be-supported points at once instead of sequentially: See branch interlocking_gen PolygonUtils::spreadDots (Or work with sparse grids.)
- * - Lots of magic values ... to many to parameterize. But are they the best?
- * - Move more complex computations from LightningGenerator constructor to elsewhere.
- */
-
 using namespace cura;
 
 LightningGenerator::LightningGenerator(const SliceMeshStorage& mesh)
 {
     const auto infill_extruder = mesh.settings.get<ExtruderTrain&>("infill_extruder_nr");
-    const auto layer_thickness = infill_extruder.settings_.get<coord_t>(
-        "layer_height"); // Note: There's not going to be a layer below the first one, so the 'initial layer height' doesn't have to be taken into account.
+    const auto layer_thickness = infill_extruder.settings_.get<coord_t>("layer_height");
     const auto infill_line_width = infill_extruder.settings_.get<coord_t>("infill_line_width");
     const auto infill_wall_line_count = static_cast<coord_t>(mesh.settings.get<size_t>("infill_wall_line_count"));
     const auto line_distance = infill_extruder.settings_.get<coord_t>("infill_line_distance");
@@ -40,13 +25,19 @@ LightningGenerator::LightningGenerator(const SliceMeshStorage& mesh)
     const auto prune_angle = infill_extruder.settings_.get<AngleRadians>("lightning_infill_prune_angle");
     const auto straightening_angle = infill_extruder.settings_.get<AngleRadians>("lightning_infill_straightening_angle");
 
-    if (mesh.settings.has("lightning_experimental_variant", true))
+    if (mesh.settings.has("lightning_smoothing", true))
     {
-        experimental_variant = mesh.settings.get<int>("lightning_experimental_variant");
-        if (experimental_variant < 0 || experimental_variant > 22)
-        {
-            experimental_variant = 0;
-        }
+        lightning_smoothing = mesh.settings.get<double>("lightning_smoothing");
+        lightning_smoothing = std::max(0.0, std::min(100.0, lightning_smoothing));
+    }
+    if (mesh.settings.has("lightning_offset_widths", true))
+    {
+        lightning_offset_widths = mesh.settings.get<double>("lightning_offset_widths");
+        lightning_offset_widths = std::max(0.0, std::min(100.0, lightning_offset_widths));
+    }
+    if (mesh.settings.has("lightning_single_path", true))
+    {
+        lightning_single_path = mesh.settings.get<bool>("lightning_single_path");
     }
 
     std::vector<Shape> areas_per_layer;
@@ -58,7 +49,6 @@ LightningGenerator::LightningGenerator(const SliceMeshStorage& mesh)
         {
             infill_area_here.push_back(part.getOwnInfillArea());
         }
-
         areas_per_layer.push_back(infill_area_here);
     }
 
@@ -72,8 +62,10 @@ LightningGenerator::LightningGenerator(const SupportStorage& support)
         return;
     }
 
-    // Keep support-lightning on stock behavior for this experiment.
-    experimental_variant = 0;
+    // Support Lightning remains stock Cura behavior.
+    lightning_smoothing = 0.0;
+    lightning_offset_widths = 0.0;
+    lightning_single_path = false;
 
     const Settings& settings = Application::getInstance().current_slice_->scene.current_mesh_group->settings;
     const auto support_extruder = settings.get<ExtruderTrain&>("support_extruder_nr");
@@ -95,7 +87,6 @@ LightningGenerator::LightningGenerator(const SupportStorage& support)
         {
             supper_area_here.push_back(part.infill_area_per_combine_per_density_.front().front());
         }
-
         areas_per_layer.push_back(supper_area_here);
     }
 
@@ -108,14 +99,10 @@ void LightningGenerator::generateInitialInternalOverhangs(const coord_t infill_w
     const coord_t infill_wall_offset = -infill_wall_thickness;
 
     Shape infill_area_above;
-    // Iterate from top to bottom, to subtract the overhang areas above from the overhang areas on the layer below, to get only overhang in the top layer where it is overhanging.
     for (const auto& [layer_nr, layer_shape] : shape_per_layer | ranges::views::enumerate | ranges::views::reverse)
     {
         Shape infill_area_here = layer_shape.offset(infill_wall_offset);
-
-        // Remove the part of the infill area that is already supported by the walls.
         Shape overhang = infill_area_here.offset(-wall_supporting_radius).difference(infill_area_above);
-
         overhang_per_layer[layer_nr] = overhang;
         infill_area_above = std::move(infill_area_here);
     }
@@ -154,33 +141,28 @@ void LightningGenerator::generateTrees(const coord_t infill_wall_thickness, cons
     std::vector<Shape> infill_outlines;
     infill_outlines.insert(infill_outlines.end(), shape_per_layer.size(), Shape());
 
-    // For-each layer from top to bottom:
     for (const auto& [layer_nr, layer_shape] : shape_per_layer | ranges::views::enumerate | ranges::views::reverse)
     {
         infill_outlines[layer_nr].push_back(layer_shape.offset(infill_wall_offset));
     }
 
-    // For various operations its beneficial to quickly locate nearby features on the polygon:
     const size_t top_layer_id = shape_per_layer.size() - 1;
     auto outlines_locator_ptr = PolygonUtils::createLocToLineGrid(infill_outlines[top_layer_id], locator_cell_size);
 
-    // For-each layer from top to bottom:
     for (int layer_id = top_layer_id; layer_id >= 0; layer_id--)
     {
         LightningLayer& current_lightning_layer = lightning_layers[layer_id];
-        current_lightning_layer.experimental_variant = experimental_variant;
+        current_lightning_layer.lightning_smoothing = lightning_smoothing;
+        current_lightning_layer.lightning_offset_widths = lightning_offset_widths;
+        current_lightning_layer.lightning_single_path = lightning_single_path;
 
         Shape& current_outlines = infill_outlines[layer_id];
         const auto& outlines_locator = *outlines_locator_ptr;
 
-        // register all trees propagated from the previous layer as to-be-reconnected
         std::vector<LightningTreeNodeSPtr> to_be_reconnected_tree_roots = current_lightning_layer.tree_roots;
-
         current_lightning_layer.generateNewTrees(overhang_per_layer[layer_id], current_outlines, outlines_locator, supporting_radius, wall_supporting_radius);
-
         current_lightning_layer.reconnectRoots(to_be_reconnected_tree_roots, current_outlines, outlines_locator, supporting_radius, wall_supporting_radius);
 
-        // Initialize trees for next lower layer from the current one.
         if (layer_id == 0)
         {
             return;
