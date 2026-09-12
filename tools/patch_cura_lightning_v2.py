@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Patch a Cura source/package tree with the CuraLightning V2 selector.
+"""Patch a Cura source/package tree with CuraLightning numeric controls.
 
-The custom CuraEngine understands the integer setting
-``lightning_experimental_variant`` with values 0..22. This script adds a
-visible Cura enum so all variants can be selected in one running Cura session.
+Adds two real-valued Lightning controls:
+- lightning_smoothing: 0.0..100.0
+- lightning_offset_widths: 0.0..100.0 extrusion widths
 
 Usage:
     python tools/patch_cura_lightning_v2.py PATH_TO_CURA_ROOT
@@ -15,7 +15,9 @@ import json
 import sys
 from pathlib import Path
 
-SETTING_KEY = "lightning_experimental_variant"
+SMOOTHING_KEY = "lightning_smoothing"
+OFFSET_KEY = "lightning_offset_widths"
+OLD_SELECTOR_KEY = "lightning_experimental_variant"
 
 
 def find_resource(root: Path, relative: str) -> Path:
@@ -34,19 +36,28 @@ def patch_definition(path: Path) -> None:
     with path.open("r", encoding="utf-8") as handle:
         data = json.load(handle)
 
-    settings = data["settings"]
-    infill = settings["infill"]
-    children = infill.setdefault("children", {})
+    children = data["settings"]["infill"].setdefault("children", {})
+    children.pop(OLD_SELECTOR_KEY, None)
 
-    options = {"0": "Stock Lightning"}
-    options.update({str(i): f"Experimental {i}" for i in range(1, 23)})
+    children[SMOOTHING_KEY] = {
+        "label": "Lightning Smoothing",
+        "description": "Rounds Lightning paths progressively. 0 keeps the raw Lightning shape; 100 applies intentionally extreme broad smoothing. Smoothing backs off locally to avoid crossing another Lightning path.",
+        "type": "float",
+        "default_value": 0.0,
+        "minimum_value": 0.0,
+        "maximum_value": 100.0,
+        "enabled": "infill_pattern == 'lightning'",
+        "settable_per_mesh": True,
+    }
 
-    children[SETTING_KEY] = {
-        "label": "Lightning Experimental Variant",
-        "description": "Selects the CuraLightning V2 Lightning algorithm. Stock uses normal Cura Lightning; Experimental 1 through 22 select the test variants.",
-        "type": "enum",
-        "options": options,
-        "default_value": "0",
+    children[OFFSET_KEY] = {
+        "label": "Lightning Offset Distance",
+        "description": "Maximum companion-path offset measured literally in extrusion line widths. Decimal values are allowed: 5.6 means 5.6 line widths; 75 means 75 line widths. The offset backs off locally to avoid crossing another Lightning path.",
+        "type": "float",
+        "unit": "x line width",
+        "default_value": 0.0,
+        "minimum_value": 0.0,
+        "maximum_value": 100.0,
         "enabled": "infill_pattern == 'lightning'",
         "settable_per_mesh": True,
     }
@@ -58,10 +69,8 @@ def patch_definition(path: Path) -> None:
 
 def patch_visibility(path: Path) -> None:
     text = path.read_text(encoding="utf-8")
-    if SETTING_KEY in text:
-        return
+    lines = [line for line in text.splitlines() if line != OLD_SELECTOR_KEY]
 
-    lines = text.splitlines()
     try:
         infill_index = lines.index("[infill]")
     except ValueError as exc:
@@ -70,7 +79,12 @@ def patch_visibility(path: Path) -> None:
     insert_at = infill_index + 1
     while insert_at < len(lines) and not lines[insert_at].startswith("["):
         insert_at += 1
-    lines.insert(insert_at, SETTING_KEY)
+
+    for key in (SMOOTHING_KEY, OFFSET_KEY):
+        if key not in lines:
+            lines.insert(insert_at, key)
+            insert_at += 1
+
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -86,16 +100,19 @@ def main() -> int:
     patch_definition(definition)
     patch_visibility(visibility)
 
-    # Re-read to make failures explicit in CI.
     with definition.open("r", encoding="utf-8") as handle:
         patched = json.load(handle)
-    setting = patched["settings"]["infill"]["children"].get(SETTING_KEY)
-    if not setting or len(setting.get("options", {})) != 23:
-        raise RuntimeError("CuraLightning V2 selector verification failed")
+    children = patched["settings"]["infill"]["children"]
+    for key in (SMOOTHING_KEY, OFFSET_KEY):
+        setting = children.get(key)
+        if not setting:
+            raise RuntimeError(f"Missing CuraLightning control: {key}")
+        if setting.get("minimum_value") != 0.0 or setting.get("maximum_value") != 100.0:
+            raise RuntimeError(f"Bad range for CuraLightning control: {key}")
 
     print(f"Patched {definition}")
     print(f"Patched {visibility}")
-    print("Verified selector: Stock + Experimental 1..22")
+    print("Verified Lightning controls: smoothing 0..100; offset 0..100 line widths")
     return 0
 
 
